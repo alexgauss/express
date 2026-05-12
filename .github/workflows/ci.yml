@@ -5,49 +5,65 @@ on:
     branches:
       - master
       - develop
-      - '4.x'
-      - '5.x'
-      - '5.0'
+      - 'v6.x'
     paths-ignore:
       - '*.md'
+      - 'wiki/**'
   pull_request:
+    paths-ignore:
+      - '*.md'
+      - 'wiki/**'
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# Cancel in progress workflows
-# in the scenario where we already had a run going for that PR/branch/tag but then triggered a new run
 concurrency:
   group: "${{ github.workflow }} ✨ ${{ github.event.pull_request.head.label || github.head_ref || github.ref }}"
   cancel-in-progress: true
 
 jobs:
-  lint:
-    name: Lint
+  typecheck:
+    name: Type Check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+
       - name: Setup Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
           node-version: 'lts/*'
+          cache: 'npm'
 
       - name: Install dependencies
         run: npm install --ignore-scripts --include=dev
 
-      - name: Run type check
+      - name: TypeScript type check
         run: npm run lint
+
+      - name: Verify no JS source files exist (pure TypeScript)
+        run: |
+          found=$(find src -name '*.js' 2>/dev/null | head -5)
+          if [ -n "$found" ]; then
+            echo "ERROR: JavaScript source files found in src/:"
+            echo "$found"
+            exit 1
+          fi
+          echo "All source files are TypeScript — OK"
 
   test:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        node-version: [18, 19, 20, 21, 22, 23, 24, 25]
-        # Node.js release schedule: https://nodejs.org/en/about/releases/
+        node-version:
+          - '18'
+          - '20'
+          - '22'
+          - '24'
+          - 'lts/*'
 
     name: Node.js ${{ matrix.node-version }} - ${{matrix.os}}
 
@@ -61,6 +77,7 @@ jobs:
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
           node-version: ${{ matrix.node-version }}
+          cache: 'npm'
 
       - name: Configure npm loglevel
         run: |
@@ -112,9 +129,31 @@ jobs:
 
       - name: Merge coverage reports
         shell: bash
-        run: find ./coverage -name lcov.info -exec printf '-a %q\n' {} \; | xargs lcov -o ./lcov.info
+        run: |
+          find ./coverage -name lcov.info -exec printf '-a %q\n' {} \; | xargs lcov -o ./lcov.info
+          ls -la lcov.info
 
       - name: Upload coverage report
         uses: coverallsapp/github-action@5cbfd81b66ca5d10c19b062c04de0199c215fb6e # v2.3.7
         with:
           file: ./lcov.info
+
+  notify:
+    needs: [typecheck, test]
+    if: failure() && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Create issue on failure
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `CI failed on master: ${context.workflow}`,
+              body: `The CI workflow failed on the master branch.
+
+              See: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+            })
