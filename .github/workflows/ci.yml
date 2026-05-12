@@ -38,7 +38,7 @@ jobs:
       - name: Install dependencies
         run: npm install --ignore-scripts --include=dev
 
-      - name: Run lint
+      - name: Run type check
         run: npm run lint
 
   test:
@@ -69,6 +69,9 @@ jobs:
 
       - name: Install dependencies
         run: npm install
+
+      - name: Build TypeScript
+        run: npm run build
 
       - name: Output Node and NPM versions
         run: |

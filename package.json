@@ -50,6 +50,7 @@
     "mime-types": "^3.0.0",
     "on-finished": "^2.4.1",
     "once": "^1.4.0",
+    "openapi3-ts": "^4.5.0",
     "parseurl": "^1.3.3",
     "proxy-addr": "^2.0.7",
     "qs": "^6.14.2",
@@ -58,6 +59,7 @@
     "serve-static": "^2.2.0",
     "statuses": "^2.0.1",
     "type-is": "^2.0.1",
+    "valibot": "^1.4.0",
     "vary": "^1.1.2"
   },
   "devDependencies": {
@@ -95,6 +97,7 @@
   "scripts": {
     "build": "tsc",
     "build:watch": "tsc --watch",
+    "lint": "tsc --noEmit",
     "test": "mocha --require test/support/env --reporter spec --check-leaks --loader tsx test/ test/acceptance/",
     "test-ci": "nyc --exclude test --reporter=lcovonly --reporter=text npm test",
     "test-cov": "nyc --exclude test --reporter=html --reporter=text npm test",

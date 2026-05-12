@@ -67,6 +67,11 @@
   - [Body Parsing](#body-parsing)
 - [Examples](#examples)
 - [TypeScript Usage](#typescript-usage)
+- [Fluent Route Builder](#fluent-route-builder)
+- [Request Validation](#request-validation)
+- [Typed HTTP Errors](#typed-http-errors)
+- [Response Helpers](#response-helpers)
+- [OpenAPI & Swagger](#openapi--swagger)  
 - [Migration from Express 5.x](#migration-from-express-5x)
 - [Running Tests](#running-tests)
 - [License](#license)
@@ -1435,6 +1440,245 @@ app.use('/api/posts', postRouter)
 app.listen(3000)
 ```
 
+## Fluent Route Builder
+
+The fluent `.route()` API lets you chain `.describe()`, `.validate()`, `.middleware()`, and HTTP verb methods in a single pipeline:
+
+```typescript
+app.route('/users/:id')
+  .describe({
+    summary: 'Get user by ID',
+    description: 'Returns a single user record',
+    tags: ['users']
+  })
+  .validate({
+    params: userParamsSchema    // Standard Schema validation
+  })
+  .middleware(authenticate, rateLimiter)
+  .get(async (req, res) => {
+    const user = await db.findUser(req.params.id)
+    if (!user) throw new NotFoundError('User', req.params.id)
+    res.ok(user)
+  })
+```
+
+The builder also works with the classic `.get(fn)` pattern — just without the extra chaining:
+
+```typescript
+app.route('/hello').get((req, res) => res.send('world'))
+```
+
+Each builder can be finalized only once. After a terminal verb (`.get()`, `.post()`, etc.) is called, the builder is locked.
+
+## Request Validation
+
+Validate request bodies, query parameters, route parameters, and headers using any **Standard Schema v1** compatible library (Valibot, Zod, ArkType).
+
+```typescript
+import * as v from 'valibot'
+import { validate } from 'express'
+
+const UserSchema = v.object({
+  name: v.pipe(v.string(), v.minLength(2)),
+  email: v.pipe(v.string(), v.email()),
+  age: v.pipe(v.number(), v.minValue(0), v.maxValue(150))
+})
+
+app.post('/users',
+  validate({ body: UserSchema }),
+  (req, res) => {
+    // req.body is validated and typed
+    res.created(req.body)
+  }
+)
+```
+
+### Standard Schema Interface
+
+The validation middleware accepts the Standard Schema v1 interface — a vendor-neutral spec. Any library that implements `'~standard'` property with a `.validate()` method works.
+
+```typescript
+interface StandardSchemaV1 {
+  '~standard': {
+    version: 1
+    vendor: string
+    validate: (input: unknown) =>
+      | { issues: StandardIssue[] }
+      | { value: unknown }
+  }
+}
+```
+
+Validation targets:
+
+| Target | Schema Key | req Property |
+|---|---|---|
+| Request body | `body` | `req.body` and `req.validated.body` |
+| Query string | `query` | `req.query` and `req.validated.query` |
+| Route params | `params` | `req.params` and `req.validated.params` |
+| Headers | `headers` | `req.headers` |
+
+On validation failure, the middleware responds with HTTP 400 and a JSON error body containing the validation issues.
+
+## Typed HTTP Errors
+
+A hierarchy of typed error classes for common HTTP status codes. Throw them in your handlers and they are automatically formatted by the global error middleware.
+
+```typescript
+import {
+  HttpError,
+  NotFoundError,
+  BadRequestError,
+  UnauthorizedError,
+  ForbiddenError,
+  ConflictError,
+  ValidationError,
+  TooManyRequestsError,
+  InternalServerError
+} from 'express'
+```
+
+**Usage:**
+
+```typescript
+app.get('/users/:id', async (req, res) => {
+  const user = await db.findUser(req.params.id)
+  if (!user) throw new NotFoundError('User', req.params.id)
+  res.ok(user)
+})
+
+app.post('/users', async (req, res) => {
+  try {
+    const user = await db.createUser(req.body)
+    res.created(user)
+  } catch (err) {
+    throw new ConflictError('Email already exists')
+  }
+})
+
+app.use('/admin', (req, res, next) => {
+  if (!req.isAuthenticated) throw new UnauthorizedError()
+  next()
+})
+```
+
+**Error hierarchy:**
+
+```
+HttpError (base)
+├── BadRequestError (400)
+├── UnauthorizedError (401)
+├── ForbiddenError (403)
+├── NotFoundError (404)
+├── ConflictError (409)
+├── ValidationError (400, with issues)
+├── TooManyRequestsError (429, with retryAfter)
+└── InternalServerError (500, not exposed by default)
+```
+
+All errors expose `.statusCode` and `.expose` (true for 4xx, false for 5xx).
+
+## Response Helpers
+
+Semantic, chainable response methods that set both status and body in one call:
+
+```typescript
+res.ok(body)                // 200 — Successful response
+res.created(body)           // 201 — Resource created
+res.noContent()             // 204 — No content
+res.badRequest(errors)      // 400 — Bad request with optional details
+res.unauthorized(msg)       // 401 — Unauthorized
+res.forbidden(msg)          // 403 — Forbidden
+res.notFound(msg)           // 404 — Not found
+res.conflict(msg)           // 409 — Conflict
+res.tooManyRequests(retry)  // 429 — Rate limited (sets Retry-After)
+res.error(status, msg)      // dynamic — Custom error response
+```
+
+**Examples:**
+
+```typescript
+app.get('/items', (req, res) => res.ok(items))
+app.post('/items', (req, res) => res.created(newItem))
+app.delete('/items/:id', (req, res) => res.noContent())
+app.get('/secret', (req, res) => res.unauthorized())
+app.get('/admin', (req, res) => res.forbidden('Admins only'))
+app.get('/missing', (req, res) => res.notFound('User not found'))
+app.get('/conflict', (req, res) => res.conflict('Already exists'))
+app.get('/limited', (req, res) => res.tooManyRequests(30))
+app.get('/custom', (req, res) => res.error(418, "I'm a teapot"))
+```
+
+## OpenAPI & Swagger
+
+Auto-generate OpenAPI 3.1 documentation from your fluent route definitions — no manual schema files needed.
+
+### Setup
+
+```typescript
+app
+  .route('/users')
+  .describe({
+    summary: 'List users',
+    description: 'Returns all registered users',
+    tags: ['users']
+  })
+  .get(listHandler)
+
+app
+  .route('/users/:id')
+  .describe({
+    summary: 'Get user by ID',
+    tags: ['users'],
+    responses: {
+      200: { description: 'User found', schema: UserSchema },
+      404: { description: 'User not found' }
+    }
+  })
+  .validate({ params: idSchema })
+  .get(getHandler)
+
+// Enable OpenAPI spec generation
+app.set('openapi', {
+  info: { title: 'My API', version: '1.0.0' },
+  servers: [{ url: 'http://localhost:3000', description: 'Development' }]
+})
+```
+
+This automatically:
+1. Collects route metadata from all `.describe()` calls in fluent builders
+2. Converts Valibot schemas to JSON Schema for request/response models
+3. Serves the generated spec at `GET /openapi.json`
+4. Serves Swagger UI at `GET /docs`
+
+### Customization
+
+```typescript
+app.set('openapi', {
+  info: {
+    title: 'My API',
+    version: '1.0.0',
+    description: 'API documentation',
+    contact: { name: 'Support', email: 'api@example.com' },
+    license: { name: 'MIT' }
+  },
+  servers: [
+    { url: 'https://api.example.com', description: 'Production' },
+    { url: 'http://localhost:3000', description: 'Development' }
+  ],
+  security: [{ bearerAuth: [] }],
+  serveUI: true    // default: true, serves Swagger UI at /docs
+})
+```
+
+### How it works
+
+- Only routes defined with the fluent `.route().describe()` builder are included in the spec
+- Bare `app.get('/path', fn)` routes are not collected (zero overhead)
+- Path parameters are normalized from `:id` to `{id}` (OpenAPI format)
+- Valibot schemas are introspected at runtime and converted to JSON Schema
+- The spec is generated once when `app.set('openapi', ...)` is called
+
 ## TypeScript Usage
 
 This rewrite is written in TypeScript and ships with complete type definitions.
@@ -1491,6 +1735,15 @@ router.get('/users', (req: Request, res: Response) => {
 - `path-to-regexp` is no longer used. The radix trie handles path matching natively. Most path patterns work identically, but exotic regex routes (`/\\/user\/(\\d+)/`) may behave differently
 - The `sync` counter (100-call stack overflow protection) has been removed. Async dispatch naturally prevents stack overflows
 - Middleware execution timing may change subtly due to async dispatch. Tests relying on `setImmediate` ordering after middleware should be reviewed
+
+**New features (backward-compatible):**
+
+- `app.route(path)` now returns a `RouteBuilder` with fluent `.describe()`, `.validate()`, `.middleware()` chaining. The classic `.get(fn)` still works
+- `res.ok()`, `res.created()`, `res.notFound()` etc. — semantic response helpers
+- `HttpError`, `NotFoundError`, `BadRequestError` etc. — typed error classes
+- `validate({ body, query, params })` — Standard Schema validation middleware
+- OpenAPI 3.1 spec auto-generation via `app.set('openapi', { info })`
+- Swagger UI served at `/docs` when OpenAPI is enabled
 
 **Preserved behavior:**
 
