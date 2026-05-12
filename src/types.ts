@@ -203,3 +203,6 @@ export type PathSegment =
   | { kind: 'wildcard'; name?: string }
 
 export type QueryParser = (str: string) => ParsedQs | Record<string, any>
+
+export type { RouteDescription } from './router/builder'
+export type { ValidationSchemas, StandardSchemaV1 } from './middleware/validate'
