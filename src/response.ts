@@ -368,4 +368,48 @@ resProto.render = function (view: string, options?: any, callback?: any): void {
   })
 }
 
+resProto.ok = function (body?: any): any {
+  return this.status(200).send(body)
+}
+
+resProto.created = function (body?: any): any {
+  return this.status(201).send(body)
+}
+
+resProto.noContent = function (): any {
+  return this.status(204).end()
+}
+
+resProto.badRequest = function (errors?: any): any {
+  const body = errors ? { error: 'Bad request', details: errors } : { error: 'Bad request' }
+  return this.status(400).json(body)
+}
+
+resProto.unauthorized = function (message?: string): any {
+  return this.status(401).json({ error: message || 'Unauthorized' })
+}
+
+resProto.forbidden = function (message?: string): any {
+  return this.status(403).json({ error: message || 'Forbidden' })
+}
+
+resProto.notFound = function (message?: string): any {
+  return this.status(404).json({ error: message || 'Not found' })
+}
+
+resProto.conflict = function (message?: string): any {
+  return this.status(409).json({ error: message || 'Conflict' })
+}
+
+resProto.tooManyRequests = function (retryAfter?: number): any {
+  if (retryAfter !== undefined) {
+    this.set('Retry-After', String(retryAfter))
+  }
+  return this.status(429).json({ error: 'Too many requests' })
+}
+
+resProto.error = function (status: number, message?: string): any {
+  return this.status(status).json({ error: message || 'Error' })
+}
+
 export { resProto }
