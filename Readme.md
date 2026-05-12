@@ -806,12 +806,60 @@ app.get('/user/:id', (req, res, next) => {
 })
 ```
 
-Async error handling works automatically:
+Async error handling works automatically — rejected promises are caught by the pipeline and forwarded to error middleware:
 
 ```typescript
+// Async rejection automatically becomes next(error)
 app.get('/data', async (req, res) => {
-  const data = await db.query()  // rejections become 500
+  const data = await db.query()  // if this rejects, error middleware catches it
   res.json(data)
+})
+
+// Async throw also works
+app.get('/throw', async (req, res) => {
+  throw new Error('Boom')  // caught by error handler
+})
+
+// Wrapping async handlers to catch errors
+function wrap(fn: (req: any, res: any, next: any) => Promise<any>) {
+  return (req: any, res: any, next: any) => {
+    fn(req, res, next).catch(next)
+  }
+}
+
+app.get('/wrapped', wrap(async (req, res) => {
+  const data = await db.query()
+  if (!data) throw new Error('Not found')
+  res.json(data)
+}))
+
+// Structured error responses
+class AppError extends Error {
+  constructor(public statusCode: number, message: string) {
+    super(message)
+    this.name = 'AppError'
+  }
+}
+
+app.get('/user/:id', async (req, res) => {
+  const user = await db.findUser(Number(req.params.id))
+  if (!user) throw new AppError(404, 'User not found')
+  res.json(user)
+})
+
+app.use((err: Error, req: any, res: any, next: any) => {
+  if (err instanceof AppError) {
+    return res.status(err.statusCode).json({
+      error: err.message,
+      code: err.statusCode
+    })
+  }
+
+  console.error('Unhandled error:', err)
+  res.status(500).json({
+    error: 'Internal Server Error',
+    ...(process.env.NODE_ENV === 'development' ? { stack: err.stack } : {})
+  })
 })
 ```
 
@@ -847,7 +895,73 @@ app.use(express.text())
 
 ## Examples
 
-### RESTful API
+### Async RESTful API (Database-backed)
+
+```typescript
+import express from 'express'
+
+interface User {
+  id: number
+  name: string
+  email: string
+  createdAt: Date
+}
+
+const app = express()
+app.use(express.json())
+
+// Simulated async database
+const db = {
+  async findUsers(): Promise<User[]> {
+    return [{ id: 1, name: 'Alice', email: 'alice@example.com', createdAt: new Date() }]
+  },
+  async findUser(id: number): Promise<User | null> {
+    return { id, name: 'Bob', email: 'bob@example.com', createdAt: new Date() }
+  },
+  async createUser(data: Partial<User>): Promise<User> {
+    return { id: Date.now(), ...data, createdAt: new Date() } as User
+  },
+  async updateUser(id: number, data: Partial<User>): Promise<User> {
+    return { id, ...data, createdAt: new Date() } as User
+  },
+  async deleteUser(id: number): Promise<void> {}
+}
+
+// GET /users — async list with error handling
+app.get('/users', async (req, res) => {
+  try {
+    const users = await db.findUsers()
+    res.json(users)
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch users' })
+  }
+})
+
+// GET /users/:id — async single record with 404
+app.get('/users/:id', async (req, res) => {
+  try {
+    const user = await db.findUser(Number(req.params.id))
+    if (!user) return res.status(404).json({ error: 'User not found' })
+    res.json(user)
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch user' })
+  }
+})
+
+// POST /users — async creation
+app.post('/users', async (req, res) => {
+  try {
+    const user = await db.createUser(req.body)
+    res.status(201).json(user)
+  } catch (err) {
+    res.status(400).json({ error: 'Failed to create user' })
+  }
+})
+
+app.listen(3000)
+```
+
+### Async Error Handling Patterns
 
 ```typescript
 import express from 'express'
@@ -855,37 +969,385 @@ import express from 'express'
 const app = express()
 app.use(express.json())
 
-const items: Array<{ id: number; name: string }> = []
-
-app.get('/items', (req, res) => {
-  res.json(items)
+// Pattern 1: try/catch per handler
+app.get('/safe/:id', async (req, res) => {
+  try {
+    const data = await riskyOperation(req.params.id)
+    res.json(data)
+  } catch (err: any) {
+    res.status(500).json({ error: err.message })
+  }
 })
 
-app.get('/items/:id', (req, res) => {
-  const item = items.find(i => i.id === Number(req.params.id))
-  if (!item) return res.status(404).send('Not found')
-  res.json(item)
+// Pattern 2: async wrapper helper
+function asyncHandler(fn: (req: any, res: any, next: any) => Promise<any>) {
+  return (req: any, res: any, next: any) => {
+    fn(req, res, next).catch(next)
+  }
+}
+
+app.get('/wrapped/:id', asyncHandler(async (req, res) => {
+  const data = await riskyOperation(req.params.id)
+  res.json(data)
+}))
+
+// Pattern 3: global error handler catches all async rejections
+app.get('/unhandled', async (req, res) => {
+  throw new Error('This async error is caught by the error middleware below')
 })
 
-app.post('/items', (req, res) => {
-  const item = { id: items.length + 1, ...req.body }
-  items.push(item)
-  res.status(201).json(item)
+app.use((err: Error, req: any, res: any, next: any) => {
+  console.error('Unhandled error:', err.message)
+  res.status(500).json({
+    error: err.message,
+    stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+  })
 })
 
-app.put('/items/:id', (req, res) => {
-  const idx = items.findIndex(i => i.id === Number(req.params.id))
-  if (idx === -1) return res.status(404).send('Not found')
-  items[idx] = { ...items[idx], ...req.body }
-  res.json(items[idx])
+async function riskyOperation(id: string): Promise<any> {
+  const num = Number(id)
+  if (isNaN(num)) throw new Error('Invalid ID')
+  return { id: num, status: 'ok' }
+}
+
+app.listen(3000)
+```
+
+### Async Middleware with External API Calls
+
+```typescript
+import express from 'express'
+
+const app = express()
+
+interface GeoIP {
+  ip: string
+  country: string
+  city: string
+}
+
+// Async middleware that enriches the request
+async function geoMiddleware(req: any, res: any, next: any) {
+  try {
+    const response = await fetch(`https://freegeoip.app/json/${req.ip}`)
+    const geo: GeoIP = await response.json()
+    req.geo = geo
+  } catch {
+    req.geo = { ip: req.ip, country: 'Unknown', city: 'Unknown' }
+  }
+  next()
+}
+
+app.use(geoMiddleware)
+
+// Async middleware with timing
+async function timingMiddleware(req: any, res: any, next: any) {
+  const start = Date.now()
+  const originalEnd = res.end.bind(res)
+
+  res.end = (...args: any[]) => {
+    const duration = Date.now() - start
+    console.log(`[TIMING] ${req.method} ${req.url} - ${duration}ms (geo: ${req.geo?.country})`)
+
+    // Async log write (fire-and-forget)
+    fetch('http://logging-service/api/log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ method: req.method, url: req.url, duration, geo: req.geo })
+    }).catch(() => {})
+
+    originalEnd(...args)
+  }
+
+  next()
+}
+
+app.use(timingMiddleware)
+
+app.get('/hello', (req, res) => {
+  res.json({ message: 'Hello', geo: (req as any).geo })
 })
 
-app.delete('/items/:id', (req, res) => {
-  const idx = items.findIndex(i => i.id === Number(req.params.id))
-  if (idx === -1) return res.status(404).send('Not found')
-  items.splice(idx, 1)
-  res.status(204).end()
+app.listen(3000)
+```
+
+### Async Data Pipeline with Batching
+
+```typescript
+import express from 'express'
+
+const app = express()
+app.use(express.json())
+
+// Simulated external services
+class AnalyticsService {
+  async trackEvent(event: string, data: any): Promise<void> {
+    await new Promise(r => setTimeout(r, 10))
+  }
+
+  async batchTrack(events: Array<{ event: string; data: any }>): Promise<void> {
+    await new Promise(r => setTimeout(r, 30))
+  }
+}
+
+class EmailService {
+  async sendWelcome(user: { email: string; name: string }): Promise<void> {
+    await new Promise(r => setTimeout(r, 50))
+  }
+}
+
+class CacheService {
+  private store = new Map<string, any>()
+
+  async get(key: string): Promise<any | null> {
+    return this.store.get(key) || null
+  }
+
+  async set(key: string, value: any, ttl: number): Promise<void> {
+    this.store.set(key, value)
+  }
+
+  async invalidate(pattern: string): Promise<void> {
+    for (const key of this.store.keys()) {
+      if (key.startsWith(pattern)) this.store.delete(key)
+    }
+  }
+}
+
+const analytics = new AnalyticsService()
+const email = new EmailService()
+const cache = new CacheService()
+
+// Concurrent async operations with Promise.all
+app.post('/users', async (req, res) => {
+  const { name, email: userEmail } = req.body
+
+  // Run multiple async operations concurrently
+  const [user] = await Promise.all([
+    db.createUser({ name, email: userEmail }),
+    analytics.trackEvent('user.created', { name })
+  ])
+
+  // Fire and forget — send welcome email in background
+  email.sendWelcome({ email: userEmail, name }).catch(err => {
+    console.error('Failed to send welcome email:', err.message)
+  })
+
+  res.status(201).json(user)
 })
+
+// Async request with caching
+app.get('/users/:id', async (req, res) => {
+  const cacheKey = `user:${req.params.id}`
+
+  // Check cache first
+  const cached = await cache.get(cacheKey)
+  if (cached) {
+    res.set('X-Cache', 'HIT')
+    return res.json(cached)
+  }
+
+  // Cache miss — query database
+  const user = await db.findUser(Number(req.params.id))
+  if (!user) return res.status(404).end()
+
+  // Store in cache (don't block response)
+  cache.set(cacheKey, user, 300).catch(() => {})
+
+  res.set('X-Cache', 'MISS')
+  res.json(user)
+})
+
+// Batch updates with async coordination
+app.patch('/users/batch', async (req, res) => {
+  const updates: Array<{ id: number; data: Partial<User> }> = req.body.updates
+
+  // Process all updates concurrently
+  const results = await Promise.allSettled(
+    updates.map(u => db.updateUser(u.id, u.data))
+  )
+
+  const succeeded = results.filter(r => r.status === 'fulfilled').length
+  const failed = results.filter(r => r.status === 'rejected').length
+
+  // Invalidate cache for all updated users
+  const ids = updates.map(u => u.id)
+  await Promise.all(ids.map(id => cache.invalidate(`user:${id}`)))
+
+  // Track batch event
+  analytics.trackEvent('users.batch_updated', { count: succeeded })
+
+  res.json({ succeeded, failed })
+})
+
+app.listen(3000)
+```
+
+### Async Stream Processing
+
+```typescript
+import express from 'express'
+import { Readable } from 'node:stream'
+
+const app = express()
+
+// Async generator route — stream data as it becomes available
+app.get('/stream/numbers', async (req, res) => {
+  res.setHeader('Content-Type', 'application/x-ndjson')
+  res.setHeader('Transfer-Encoding', 'chunked')
+
+  async function* generateNumbers() {
+    for (let i = 1; i <= 100; i++) {
+      await new Promise(r => setTimeout(r, 10)) // simulate async work
+      yield JSON.stringify({ id: i, timestamp: Date.now() }) + '\n'
+    }
+  }
+
+  const stream = Readable.from(generateNumbers())
+  stream.pipe(res)
+})
+
+// Async batch processor with progress
+app.post('/process', express.raw({ type: 'application/octet-stream' }), async (req, res) => {
+  const chunks: Buffer[] = []
+  const totalSize = req.body.length
+  let processed = 0
+
+  res.setHeader('Content-Type', 'application/x-ndjson')
+  res.setHeader('Transfer-Encoding', 'chunked')
+
+  const BATCH_SIZE = 1024
+
+  for (let offset = 0; offset < totalSize; offset += BATCH_SIZE) {
+    const chunk = req.body.slice(offset, offset + BATCH_SIZE)
+
+    // Simulate async processing
+    await new Promise(r => setImmediate(r))
+
+    processed += chunk.length
+    const progress = ((processed / totalSize) * 100).toFixed(1)
+
+    res.write(JSON.stringify({ progress: `${progress}%`, bytes: processed }) + '\n')
+  }
+
+  res.end()
+})
+
+// Async webhook delivery with retries
+async function deliverWebhook(url: string, payload: any, retries = 3): Promise<boolean> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+      if (response.ok) return true
+    } catch (err) {
+      console.error(`Webhook attempt ${attempt}/${retries} failed for ${url}`)
+      if (attempt < retries) await new Promise(r => setTimeout(r, 1000 * attempt))
+    }
+  }
+  return false
+}
+
+app.post('/webhooks/trigger', async (req, res) => {
+  const { event, data, subscribers } = req.body
+
+  // Deliver to all subscribers concurrently
+  const results = await Promise.allSettled(
+    subscribers.map((sub: string) => deliverWebhook(sub, { event, data }))
+  )
+
+  const delivered = results.filter(r => r.status === 'fulfilled' && r.value).length
+  const failed = results.filter(r => r.status === 'rejected' || !r.value).length
+
+  res.json({ event, delivered, failed, total: subscribers.length })
+})
+
+app.listen(3000)
+```
+
+### Async Request Validation
+
+```typescript
+import express from 'express'
+
+const app = express()
+app.use(express.json())
+
+// Async validation middleware
+function validate(schema: { [key: string]: (val: any) => Promise<string | null> }) {
+  return async (req: any, res: any, next: any) => {
+    const errors: string[] = []
+
+    for (const [field, validator] of Object.entries(schema)) {
+      const value = req.body[field]
+      const error = await validator(value)
+      if (error) errors.push(error)
+    }
+
+    if (errors.length > 0) {
+      return res.status(400).json({ errors })
+    }
+
+    next()
+  }
+}
+
+// Async validators
+const validators = {
+  email: async (val: any): Promise<string | null> => {
+    if (!val) return 'Email is required'
+    if (typeof val !== 'string') return 'Email must be a string'
+    if (!val.includes('@')) return 'Invalid email format'
+
+    // Async email domain validation
+    const domain = val.split('@')[1]
+    try {
+      const response = await fetch(`https://dns.google/resolve?name=${domain}&type=MX`)
+      const data = await response.json()
+      if (!data.Answer || data.Answer.length === 0) {
+        return `Domain ${domain} does not accept email`
+      }
+    } catch {
+      return 'Could not validate email domain'
+    }
+
+    return null
+  },
+
+  age: async (val: any): Promise<string | null> => {
+    if (val === undefined || val === null) return 'Age is required'
+    const num = Number(val)
+    if (isNaN(num)) return 'Age must be a number'
+    if (num < 0 || num > 150) return 'Age must be between 0 and 150'
+
+    return null
+  },
+
+  username: async (val: any): Promise<string | null> => {
+    if (!val) return 'Username is required'
+    if (typeof val !== 'string') return 'Username must be a string'
+    if (val.length < 3) return 'Username must be at least 3 characters'
+    if (!/^[a-zA-Z0-9_]+$/.test(val)) return 'Username can only contain letters, numbers, and underscores'
+
+    return null
+  }
+}
+
+app.post('/register',
+  validate({
+    email: validators.email,
+    age: validators.age,
+    username: validators.username
+  }),
+  async (req, res) => {
+    // All validation passed
+    const user = await db.createUser(req.body)
+    res.status(201).json(user)
+  }
+)
 
 app.listen(3000)
 ```
