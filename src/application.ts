@@ -3,10 +3,13 @@ import * as path from 'node:path'
 import { EventEmitter } from 'node:events'
 const merge = require('merge-descriptors')
 import { Router } from './router/index'
+import { RouteBuilder } from './router/builder'
 import { View } from './view'
 import { reqProto } from './request'
 import { resProto } from './response'
 import { compileETag } from './utils'
+import { OpenAPIRegistry } from './openapi/index'
+import { serveOpenAPI, serveSwaggerUI } from './openapi/ui'
 
 const finalhandler = require('finalhandler')
 
@@ -135,7 +138,7 @@ function createProto(): Record<string, any> {
   }
 
   proto.route = function (path: string) {
-    return this.lazyrouter().route(path)
+    return new RouteBuilder(path, this.lazyrouter())
   }
 
   proto.param = function (name: any, fn: any) {
@@ -167,6 +170,22 @@ function createProto(): Record<string, any> {
           this.settings['trust proxy fn'] = require('proxy-addr').compile(value)
         } else {
           this.settings['trust proxy fn'] = false
+        }
+        break
+      case 'openapi':
+        {
+          const opts = value || {}
+          const info = opts.info || { title: 'API', version: '1.0.0' }
+          const spec = OpenAPIRegistry.generateSpec({
+            info,
+            servers: opts.servers || [{ url: '/' }],
+            security: opts.security
+          })
+          const router = this.lazyrouter()
+          router.get('/openapi.json', serveOpenAPI(spec))
+          if (opts.serveUI !== false) {
+            router.get('/docs', serveSwaggerUI('/openapi.json'))
+          }
         }
         break
     }
